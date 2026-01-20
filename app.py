@@ -16,6 +16,8 @@ if 'scanned_data' not in st.session_state:
     st.session_state['scanned_data'] = None
 if 'root_path' not in st.session_state:
     st.session_state['root_path'] = os.getcwd()
+if 'current_view_path' not in st.session_state:
+    st.session_state['current_view_path'] = st.session_state['root_path']
 
 # Input Section
 path_input = st.text_input("Directory Path:", value=st.session_state['root_path'])
@@ -23,6 +25,7 @@ path_input = st.text_input("Directory Path:", value=st.session_state['root_path'
 if st.button("Analyze"):
     if os.path.exists(path_input) and os.path.isdir(path_input):
         st.session_state['root_path'] = path_input
+        st.session_state['current_view_path'] = path_input
         progress_bar = st.progress(0, text="Starting scan...")
 
         # We'll use a slightly different scanning approach for the main loop to ensure we capture the root children correctly
@@ -55,37 +58,74 @@ if st.session_state['scanned_data']:
             values='value',
             branchvalues='total',
             ids='id',
+            height=700,
         )
-        st.plotly_chart(fig, use_container_width=True)
+
+        # Capture selection from the chart
+        event = st.plotly_chart(fig, use_container_width=True, on_select="rerun")
+
+        # Update view path based on chart selection
+        if event and 'selection' in event and event['selection']['points']:
+            try:
+                # Get the ID of the clicked sector (which is the file path)
+                clicked_id = event['selection']['points'][0]['id']
+                st.session_state['current_view_path'] = clicked_id
+            except (IndexError, KeyError):
+                pass
 
         # Data Table for Management
         st.divider()
         st.subheader("Manage Files")
+        st.caption(f"Current Path: {st.session_state['current_view_path']}")
 
-        # Filter to show only immediate children of the root path for easier management
-        root_children = df[df['parent'] == st.session_state['root_path']].copy()
+        # Filter to show only immediate children of the current view path
+        root_children = df[df['parent'] == st.session_state['current_view_path']].copy()
         root_children['formatted_size'] = root_children['value'].apply(format_bytes)
         root_children = root_children.sort_values('value', ascending=False)
 
-        st.dataframe(
+        # Dataframe with selection
+        selection = st.dataframe(
             root_children[['label', 'formatted_size', 'id']],
             use_container_width=True,
             column_config={
                 "id": "Full Path",
                 "label": "Name",
                 "formatted_size": "Size"
-            }
+            },
+            on_select="rerun",
+            selection_mode="single-row"
         )
+
+        # Handle Dataframe Selection to update Delete Dropdown
+        # If a row is selected, we update the session_state for the selectbox key
+        if selection and "selection" in selection and selection.selection.rows:
+            selected_row_idx = selection.selection.rows[0]
+            # Map index back to the ID in the sorted dataframe
+            if selected_row_idx < len(root_children):
+                selected_id_from_table = root_children.iloc[selected_row_idx]['id']
+                st.session_state['delete_selector'] = selected_id_from_table
 
         # Deletion Interaction
         st.subheader("Delete Item")
 
         # Selection
         options = root_children['id'].tolist()
-        # Map full path to readable label for dropdown
-        format_func = lambda x: f"{os.path.basename(x)} ({format_bytes(root_children[root_children['id']==x]['value'].values[0])})"
 
-        selected_path = st.selectbox("Select item to delete:", options, format_func=format_func)
+        # Helper to safely format labels even if the list update lags slightly (though rerun handles it)
+        def format_func(x):
+            matches = root_children[root_children['id']==x]
+            if not matches.empty:
+                val = matches['value'].values[0]
+                return f"{os.path.basename(x)} ({format_bytes(val)})"
+            return os.path.basename(x)
+
+        # We use a key to allow programmatic update from the table selection
+        selected_path = st.selectbox(
+            "Select item to delete:",
+            options,
+            format_func=format_func,
+            key="delete_selector"
+        )
 
         # Delete State Management
         if 'confirm_stage' not in st.session_state:
